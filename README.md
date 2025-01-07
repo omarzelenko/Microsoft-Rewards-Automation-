@@ -17,5 +17,5 @@ Standalone EXE: No need for Python installations, thanks to the included EXE ver
 
 ❤️ Support My Work:
 If you find this project helpful, consider supporting me on Patreon to keep this tool updated and accessible for everyone. Your support means the world to me!
-🔗 Patreon Link: Support Here
+🔗 Patreon Link: patreon.com/_Refter
 
