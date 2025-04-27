@@ -4,7 +4,9 @@ import json
 import random
 import logging
 import tkinter as tk
-from tkinter import ttk, filedialog, messagebox
+from tkinter import filedialog, messagebox
+from PIL import Image, ImageTk
+import customtkinter as ctk
 from selenium import webdriver
 from selenium.webdriver.edge.service import Service
 from selenium.webdriver.edge.options import Options
@@ -15,9 +17,14 @@ from selenium.webdriver.support import expected_conditions as EC
 from selenium.common.exceptions import TimeoutException, WebDriverException
 import time
 from datetime import datetime
+import threading
 
 # Copyright (C) 2024 Refter. All rights reserved.
 # This software is licensed under the terms of the MIT License. See LICENSE.txt for more details.
+
+# Set the appearance mode and color theme
+ctk.set_appearance_mode("System")  # "System", "Dark" or "Light"
+ctk.set_default_color_theme("blue")  # "blue", "green", "dark-blue"
 
 class Config:
     DEFAULT_CONFIG = {
@@ -25,7 +32,9 @@ class Config:
         "page_load_timeout": 30,
         "max_retries": 3,
         "save_log": True,
-        "headless_mode": False
+        "headless_mode": False,
+        "appearance_mode": "System",
+        "color_theme": "blue"
     }
     
     @classmethod
@@ -60,11 +69,22 @@ def get_log_path():
         return os.path.join(os.path.dirname(sys.executable), 'logs')
     return os.path.join(os.path.dirname(os.path.abspath(__file__)), 'logs')
 
+def get_resource_path(relative_path):
+    """Get absolute path to resource, works for dev and for PyInstaller"""
+    if getattr(sys, 'frozen', False):
+        base_path = os.path.dirname(sys.executable)
+    else:
+        base_path = os.path.dirname(os.path.abspath(__file__))
+    return os.path.join(base_path, 'resources', relative_path)
+
 class BingSearchAutomation:
-    def __init__(self, status_callback=None):
+    def __init__(self, status_callback=None, progress_callback=None):
         self.config = Config.load()
         self.status_callback = status_callback
+        self.progress_callback = progress_callback
         self.setup_logging()
+        self.is_running = False
+        self.search_thread = None
 
     def setup_logging(self):
         if self.config['save_log']:
@@ -81,6 +101,10 @@ class BingSearchAutomation:
         logging.info(message)
         if self.status_callback:
             self.status_callback(message)
+
+    def update_progress(self, current, total):
+        if self.progress_callback:
+            self.progress_callback(current, total)
 
     def setup_driver(self, driver_path):
         options = Options()
@@ -99,8 +123,11 @@ class BingSearchAutomation:
             raise Exception(f"Failed to setup WebDriver: {str(e)}")
 
     def perform_search(self, search_file, driver_path):
-        if not all([os.path.isfile(f) for f in [search_file, driver_path]]):
-            raise FileNotFoundError("Search file or WebDriver not found")
+        if not os.path.isfile(search_file):
+            raise FileNotFoundError(f"Search file not found: {search_file}")
+        
+        if not os.path.isfile(driver_path):
+            raise FileNotFoundError(f"WebDriver not found: {driver_path}")
 
         try:
             with open(search_file, 'r', encoding='utf-8') as f:
@@ -118,11 +145,15 @@ class BingSearchAutomation:
             driver = self.setup_driver(driver_path)
             
             for i, search_term in enumerate(searches, 1):
+                if not self.is_running:
+                    break
+                
                 retries = 0
-                while retries < self.config['max_retries']:
+                while retries < self.config['max_retries'] and self.is_running:
                     try:
                         self.single_search(driver, search_term, i, len(searches))
                         completed_searches += 1
+                        self.update_progress(i, len(searches))
                         break
                     except TimeoutException:
                         retries += 1
@@ -140,6 +171,7 @@ class BingSearchAutomation:
                 except:
                     pass
             self.update_status(f"Completed {completed_searches}/{len(searches)} searches")
+            self.is_running = False
 
     def single_search(self, driver, search_term, current, total):
         driver.get("https://www.bing.com")
@@ -157,111 +189,463 @@ class BingSearchAutomation:
         self.update_status(f"Searching ({current}/{total}): {search_term}")
         time.sleep(delay)
 
+    def start_search_thread(self, search_file, driver_path):
+        if self.search_thread and self.search_thread.is_alive():
+            return  # Already running
+        
+        self.is_running = True
+        self.search_thread = threading.Thread(
+            target=self.perform_search, 
+            args=(search_file, driver_path)
+        )
+        self.search_thread.daemon = True
+        self.search_thread.start()
+    
+    def stop_search(self):
+        self.is_running = False
+        self.update_status("Stopping search operations...")
+
+class ToolTip:
+    def __init__(self, widget, text):
+        self.widget = widget
+        self.text = text
+        self.tip_window = None
+        self.widget.bind("<Enter>", self.show_tip)
+        self.widget.bind("<Leave>", self.hide_tip)
+
+    def show_tip(self, event=None):
+        x, y, _, _ = self.widget.bbox("insert")
+        x += self.widget.winfo_rootx() + 25
+        y += self.widget.winfo_rooty() + 25
+
+        self.tip_window = tk.Toplevel(self.widget)
+        self.tip_window.wm_overrideredirect(True)
+        self.tip_window.wm_geometry(f"+{x}+{y}")
+        
+        label = tk.Label(self.tip_window, text=self.text, background="#ffffe0", relief="solid", borderwidth=1, padx=5, pady=2)
+        label.pack()
+
+    def hide_tip(self, event=None):
+        if self.tip_window:
+            self.tip_window.destroy()
+            self.tip_window = None
+
 class SearchAutomationGUI:
     def __init__(self):
         try:
-            self.root = tk.Tk()
+            self.config = Config.load()
+            
+            # Set the appearance mode from config
+            ctk.set_appearance_mode(self.config.get("appearance_mode", "System"))
+            ctk.set_default_color_theme(self.config.get("color_theme", "blue"))
+            
+            self.root = ctk.CTk()
             self.root.title("Bing Search Automation")
-            self.root.geometry("600x400")
+            self.root.geometry("800x600")
+            self.root.minsize(700, 500)
             
-            # Set style
-            self.style = ttk.Style()
-            self.style.configure("Accent.TButton", foreground="white", background="green")
-            
-            self.automation = BingSearchAutomation(self.update_status)
+            self.setup_variables()
+            self.automation = BingSearchAutomation(
+                self.update_status, 
+                self.update_progress
+            )
             self.setup_gui()
+            
         except Exception as e:
             messagebox.showerror("Initialization Error", f"Error starting application: {str(e)}")
             if hasattr(self, 'root') and self.root:
                 self.root.destroy()
             sys.exit(1)
 
+    def setup_variables(self):
+        self.search_file_var = tk.StringVar()
+        self.driver_file_var = tk.StringVar()
+        self.headless_var = tk.BooleanVar(value=self.config.get('headless_mode', False))
+        self.search_delay_min = tk.DoubleVar(value=self.config.get('search_delay', [3, 7])[0])
+        self.search_delay_max = tk.DoubleVar(value=self.config.get('search_delay', [3, 7])[1])
+        self.page_load_timeout = tk.IntVar(value=self.config.get('page_load_timeout', 30))
+        self.max_retries = tk.IntVar(value=self.config.get('max_retries', 3))
+        self.save_log_var = tk.BooleanVar(value=self.config.get('save_log', True))
+        self.appearance_var = tk.StringVar(value=self.config.get('appearance_mode', 'System'))
+
     def setup_gui(self):
-        main_frame = ttk.Frame(self.root, padding="10")
-        main_frame.grid(row=0, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
+        # Create main container
+        self.main_frame = ctk.CTkFrame(self.root)
+        self.main_frame.pack(fill="both", expand=True, padx=20, pady=20)
         
-        self.create_file_selection(main_frame)
-        self.create_config_frame(main_frame)
-        self.create_status_frame(main_frame)
-        self.create_copyright_label(main_frame)
+        # Header frame with logo and title
+        self.create_header_frame()
         
-        # Configure grid weights
-        self.root.grid_rowconfigure(0, weight=1)
-        self.root.grid_columnconfigure(0, weight=1)
+        # Tabview for different sections
+        self.create_tabview()
+        
+        # Status frame
+        self.create_status_frame()
+        
+        # Footer with copyright
+        self.create_footer()
 
-    def create_file_selection(self, parent):
-        files_frame = ttk.LabelFrame(parent, text="File Selection", padding="5")
-        files_frame.grid(row=0, column=0, columnspan=2, sticky="ew", pady=5)
+    def create_header_frame(self):
+        header_frame = ctk.CTkFrame(self.main_frame)
+        header_frame.pack(fill="x", pady=(0, 20))
+        
+        # Try to load a logo
+        try:
+            # Path to the app icon - create a resources directory and place an icon file there
+            logo_path = get_resource_path("logo.png")
+            if os.path.exists(logo_path):
+                logo_img = Image.open(logo_path)
+                logo_img = logo_img.resize((64, 64))
+                logo_photo = ImageTk.PhotoImage(logo_img)
+                logo_label = ctk.CTkLabel(header_frame, image=logo_photo, text="")
+                logo_label.image = logo_photo  # Keep a reference
+                logo_label.pack(side="left", padx=10)
+        except Exception:
+            pass  # If logo loading fails, continue without it
+        
+        title_label = ctk.CTkLabel(header_frame, text="Bing Search Automation", font=("Helvetica", 22, "bold"))
+        title_label.pack(side="left", padx=10)
+        
+        # Appearance mode toggle
+        appearance_frame = ctk.CTkFrame(header_frame)
+        appearance_frame.pack(side="right", padx=10)
+        
+        ctk.CTkLabel(appearance_frame, text="Theme:").pack(side="left", padx=5)
+        appearance_menu = ctk.CTkOptionMenu(
+            appearance_frame, 
+            values=["System", "Light", "Dark"],
+            variable=self.appearance_var,
+            command=self.change_appearance_mode
+        )
+        appearance_menu.pack(side="left")
 
-        ttk.Label(files_frame, text="Search File:").grid(row=0, column=0, sticky="w")
-        self.search_file_entry = ttk.Entry(files_frame, width=50)
-        self.search_file_entry.grid(row=0, column=1, padx=5)
-        ttk.Button(files_frame, text="Browse", command=lambda: self.browse_file(self.search_file_entry)).grid(row=0, column=2)
+    def create_tabview(self):
+        self.tabview = ctk.CTkTabview(self.main_frame)
+        self.tabview.pack(fill="both", expand=True)
+        
+        # Create tabs
+        self.tab_search = self.tabview.add("Search")
+        self.tab_settings = self.tabview.add("Settings")
+        self.tab_about = self.tabview.add("About")
+        
+        # Fill the search tab
+        self.create_search_tab()
+        
+        # Fill the settings tab
+        self.create_settings_tab()
+        
+        # Fill the about tab
+        self.create_about_tab()
 
-        ttk.Label(files_frame, text="WebDriver File:").grid(row=1, column=0, sticky="w")
-        self.driver_file_entry = ttk.Entry(files_frame, width=50)
-        self.driver_file_entry.grid(row=1, column=1, padx=5)
-        ttk.Button(files_frame, text="Browse", command=lambda: self.browse_file(self.driver_file_entry)).grid(row=1, column=2)
+    def create_search_tab(self):
+        # File selection frame
+        files_frame = ctk.CTkFrame(self.tab_search)
+        files_frame.pack(fill="x", padx=20, pady=20)
+        
+        # Search file row
+        search_frame = ctk.CTkFrame(files_frame)
+        search_frame.pack(fill="x", pady=10)
+        
+        ctk.CTkLabel(search_frame, text="Search File:", width=100).pack(side="left")
+        search_entry = ctk.CTkEntry(search_frame, textvariable=self.search_file_var, width=400)
+        search_entry.pack(side="left", padx=10, fill="x", expand=True)
+        
+        search_button = ctk.CTkButton(
+            search_frame, 
+            text="Browse", 
+            command=lambda: self.browse_file(self.search_file_var, "Select Search File")
+        )
+        search_button.pack(side="right")
+        
+        # WebDriver file row
+        driver_frame = ctk.CTkFrame(files_frame)
+        driver_frame.pack(fill="x", pady=10)
+        
+        ctk.CTkLabel(driver_frame, text="WebDriver:", width=100).pack(side="left")
+        driver_entry = ctk.CTkEntry(driver_frame, textvariable=self.driver_file_var, width=400)
+        driver_entry.pack(side="left", padx=10, fill="x", expand=True)
+        
+        driver_button = ctk.CTkButton(
+            driver_frame, 
+            text="Browse", 
+            command=lambda: self.browse_file(self.driver_file_var, "Select WebDriver File")
+        )
+        driver_button.pack(side="right")
+        
+        # Headless mode toggle
+        headless_frame = ctk.CTkFrame(files_frame)
+        headless_frame.pack(fill="x", pady=10)
+        
+        headless_switch = ctk.CTkSwitch(
+            headless_frame, 
+            text="Headless Mode (Run in background)", 
+            variable=self.headless_var,
+            onvalue=True,
+            offvalue=False
+        )
+        headless_switch.pack(side="left")
+        ToolTip(headless_switch, "Run browser in background without UI")
+        
+        # Control buttons frame
+        control_frame = ctk.CTkFrame(self.tab_search)
+        control_frame.pack(fill="x", padx=20, pady=10)
+        
+        self.start_button = ctk.CTkButton(
+            control_frame, 
+            text="Start Searching", 
+            command=self.start_search,
+            fg_color="#28a745",
+            hover_color="#218838",
+            font=("Helvetica", 14, "bold")
+        )
+        self.start_button.pack(side="left", padx=10, expand=True, fill="x")
+        
+        self.stop_button = ctk.CTkButton(
+            control_frame, 
+            text="Stop", 
+            command=self.stop_search,
+            fg_color="#dc3545",
+            hover_color="#c82333",
+            state="disabled",
+            font=("Helvetica", 14, "bold")
+        )
+        self.stop_button.pack(side="right", padx=10, expand=True, fill="x")
 
-    def create_config_frame(self, parent):
-        config_frame = ttk.LabelFrame(parent, text="Settings", padding="5")
-        config_frame.grid(row=1, column=0, columnspan=2, sticky="ew", pady=5)
+    def create_settings_tab(self):
+        settings_frame = ctk.CTkFrame(self.tab_settings)
+        settings_frame.pack(fill="both", expand=True, padx=20, pady=20)
+        
+        # Search delay settings
+        delay_frame = ctk.CTkFrame(settings_frame)
+        delay_frame.pack(fill="x", pady=10)
+        
+        ctk.CTkLabel(delay_frame, text="Search Delay (seconds):", anchor="w").pack(anchor="w")
+        
+        delay_range_frame = ctk.CTkFrame(delay_frame)
+        delay_range_frame.pack(fill="x", pady=5)
+        
+        ctk.CTkLabel(delay_range_frame, text="Min:").pack(side="left")
+        min_delay = ctk.CTkEntry(delay_range_frame, textvariable=self.search_delay_min, width=80)
+        min_delay.pack(side="left", padx=10)
+        
+        ctk.CTkLabel(delay_range_frame, text="Max:").pack(side="left", padx=(20, 0))
+        max_delay = ctk.CTkEntry(delay_range_frame, textvariable=self.search_delay_max, width=80)
+        max_delay.pack(side="left", padx=10)
+        
+        # Page load timeout
+        timeout_frame = ctk.CTkFrame(settings_frame)
+        timeout_frame.pack(fill="x", pady=10)
+        
+        ctk.CTkLabel(timeout_frame, text="Page Load Timeout (seconds):").pack(side="left")
+        timeout_entry = ctk.CTkEntry(timeout_frame, textvariable=self.page_load_timeout, width=80)
+        timeout_entry.pack(side="left", padx=10)
+        
+        # Max retries
+        retries_frame = ctk.CTkFrame(settings_frame)
+        retries_frame.pack(fill="x", pady=10)
+        
+        ctk.CTkLabel(retries_frame, text="Max Retries:").pack(side="left")
+        retries_entry = ctk.CTkEntry(retries_frame, textvariable=self.max_retries, width=80)
+        retries_entry.pack(side="left", padx=10)
+        
+        # Save log option
+        log_frame = ctk.CTkFrame(settings_frame)
+        log_frame.pack(fill="x", pady=10)
+        
+        log_switch = ctk.CTkSwitch(
+            log_frame, 
+            text="Save Log Files", 
+            variable=self.save_log_var,
+            onvalue=True,
+            offvalue=False
+        )
+        log_switch.pack(side="left")
+        
+        # Save button
+        save_button = ctk.CTkButton(
+            settings_frame, 
+            text="Save Settings", 
+            command=self.save_settings,
+            fg_color="#007bff",
+            hover_color="#0069d9"
+        )
+        save_button.pack(pady=20)
 
-        self.headless_var = tk.BooleanVar(value=self.automation.config['headless_mode'])
-        ttk.Checkbutton(config_frame, text="Headless Mode", variable=self.headless_var).grid(row=0, column=0)
+    def create_about_tab(self):
+        about_frame = ctk.CTkFrame(self.tab_about)
+        about_frame.pack(fill="both", expand=True, padx=20, pady=20)
+        
+        # App info
+        ctk.CTkLabel(
+            about_frame, 
+            text="Bing Search Automation", 
+            font=("Helvetica", 20, "bold")
+        ).pack(pady=10)
+        
+        ctk.CTkLabel(
+            about_frame, 
+            text="Version 1.1.0", 
+            font=("Helvetica", 14)
+        ).pack()
+        
+        ctk.CTkLabel(
+            about_frame, 
+            text="This application automates Bing searches using Selenium WebDriver.\n"
+                 "It's designed to read search terms from a text file and perform searches automatically.",
+            wraplength=500
+        ).pack(pady=20)
+        
+        # Instructions
+        instructions_frame = ctk.CTkFrame(about_frame)
+        instructions_frame.pack(fill="x", pady=10)
+        
+        ctk.CTkLabel(
+            instructions_frame, 
+            text="How to use:", 
+            font=("Helvetica", 16, "bold")
+        ).pack(anchor="w", pady=5)
+        
+        instructions = (
+            "1. Select a text file containing search terms (one per line)\n"
+            "2. Select the Edge WebDriver (msedgedriver.exe)\n"
+            "3. Configure settings as needed\n"
+            "4. Click 'Start Searching' to begin"
+        )
+        
+        ctk.CTkLabel(
+            instructions_frame, 
+            text=instructions,
+            justify="left"
+        ).pack(anchor="w", padx=20)
+        
+        # Copyright
+        ctk.CTkLabel(
+            about_frame, 
+            text="© 2024 Refter. All rights reserved.\nLicensed under the MIT License.",
+            font=("Helvetica", 10)
+        ).pack(side="bottom", pady=20)
 
-        ttk.Button(config_frame, text="Start", command=self.start_search, style="Accent.TButton").grid(row=0, column=1, padx=5)
+    def create_status_frame(self):
+        status_frame = ctk.CTkFrame(self.main_frame)
+        status_frame.pack(fill="x", pady=(10, 0))
+        
+        ctk.CTkLabel(status_frame, text="Status:").pack(side="left", padx=10)
+        
+        self.status_label = ctk.CTkLabel(status_frame, text="Ready", width=500, anchor="w")
+        self.status_label.pack(side="left", fill="x", expand=True, padx=10)
+        
+        # Progress bar
+        progress_frame = ctk.CTkFrame(self.main_frame)
+        progress_frame.pack(fill="x", pady=(5, 10))
+        
+        self.progress_bar = ctk.CTkProgressBar(progress_frame)
+        self.progress_bar.pack(fill="x", padx=10, pady=5)
+        self.progress_bar.set(0)
+        
+        self.progress_label = ctk.CTkLabel(progress_frame, text="0/0")
+        self.progress_label.pack()
 
-    def create_status_frame(self, parent):
-        status_frame = ttk.LabelFrame(parent, text="Status", padding="5")
-        status_frame.grid(row=2, column=0, columnspan=2, sticky="ew", pady=5)
+    def create_footer(self):
+        footer_frame = ctk.CTkFrame(self.main_frame, height=30)
+        footer_frame.pack(fill="x", pady=(10, 0))
+        
+        copyright_label = ctk.CTkLabel(
+            footer_frame, 
+            text="© 2024 Refter. All rights reserved.", 
+            font=("Helvetica", 10)
+        )
+        copyright_label.pack(side="right", padx=10)
 
-        self.status_label = ttk.Label(status_frame, text="Ready")
-        self.status_label.grid(row=0, column=0, sticky="w")
-
-        self.progress = ttk.Progressbar(status_frame, mode='indeterminate')
-        self.progress.grid(row=1, column=0, sticky="ew", pady=5)
-
-    def create_copyright_label(self, parent):
-        copyright_label = ttk.Label(parent, text="© 2024 Refter. All rights reserved.", font=("Helvetica", 8))
-        copyright_label.grid(row=3, column=0, columnspan=2, sticky="s", pady=5)
-
-    def browse_file(self, entry_field):
-        file_path = filedialog.askopenfilename(filetypes=[("Text Files", "*.txt"), ("All Files", "*.*")])
+    def browse_file(self, var, title):
+        file_types = [("Text Files", "*.txt"), ("All Files", "*.*")]
+        if "WebDriver" in title:
+            file_types = [("WebDriver", "*.exe"), ("All Files", "*.*")]
+            
+        file_path = filedialog.askopenfilename(title=title, filetypes=file_types)
         if file_path:
-            entry_field.delete(0, tk.END)
-            entry_field.insert(0, file_path)
+            var.set(file_path)
 
     def update_status(self, message):
-        self.status_label.config(text=message)
-        self.root.update()
+        self.status_label.configure(text=message)
+        self.root.update_idletasks()
+
+    def update_progress(self, current, total):
+        if total > 0:
+            self.progress_bar.set(current / total)
+            self.progress_label.configure(text=f"{current}/{total}")
+        else:
+            self.progress_bar.set(0)
+            self.progress_label.configure(text="0/0")
+        self.root.update_idletasks()
 
     def start_search(self):
-        search_file = self.search_file_entry.get()
-        driver_path = self.driver_file_entry.get()
+        search_file = self.search_file_var.get()
+        driver_path = self.driver_file_var.get()
 
         if not search_file or not driver_path:
             messagebox.showerror("Error", "Please select both the search file and WebDriver file")
             return
-
-        self.automation.config['headless_mode'] = self.headless_var.get()
-        Config.save(self.automation.config)
-
+        
+        # Save current settings first
+        self.save_settings()
+        
         try:
-            self.progress.start()
-            self.automation.perform_search(search_file, driver_path)
+            self.automation.start_search_thread(search_file, driver_path)
+            # Update button states
+            self.start_button.configure(state="disabled")
+            self.stop_button.configure(state="normal")
         except Exception as e:
             messagebox.showerror("Error", str(e))
             logging.error(f"Error during search: {str(e)}")
-        finally:
-            self.progress.stop()
+
+    def stop_search(self):
+        if hasattr(self.automation, 'stop_search'):
+            self.automation.stop_search()
+            self.start_button.configure(state="normal")
+            self.stop_button.configure(state="disabled")
+
+    def save_settings(self):
+        try:
+            config = {
+                'search_delay': [self.search_delay_min.get(), self.search_delay_max.get()],
+                'page_load_timeout': self.page_load_timeout.get(),
+                'max_retries': self.max_retries.get(),
+                'save_log': self.save_log_var.get(),
+                'headless_mode': self.headless_var.get(),
+                'appearance_mode': self.appearance_var.get(),
+                'color_theme': 'blue'  # Could make this configurable in the future
+            }
+            Config.save(config)
+            self.automation.config = config
+            self.update_status("Settings saved successfully")
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to save settings: {str(e)}")
+
+    def change_appearance_mode(self, new_appearance_mode):
+        ctk.set_appearance_mode(new_appearance_mode)
+        self.appearance_var.set(new_appearance_mode)
+        # Save this setting
+        self.save_settings()
 
     def run(self):
         try:
+            # Create a resources directory if it doesn't exist
+            resources_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'resources')
+            os.makedirs(resources_dir, exist_ok=True)
+            
+            self.root.protocol("WM_DELETE_WINDOW", self.on_closing)
             self.root.mainloop()
         except Exception as e:
             messagebox.showerror("Error", f"Application error: {str(e)}")
             logging.error(f"Application error: {str(e)}")
+
+    def on_closing(self):
+        if hasattr(self.automation, 'is_running') and self.automation.is_running:
+            if messagebox.askokcancel("Quit", "Search is still running. Do you want to quit anyway?"):
+                self.automation.stop_search()
+                self.root.destroy()
+        else:
+            self.root.destroy()
 
 if __name__ == "__main__":
     try:
