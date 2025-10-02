@@ -34,7 +34,15 @@ class Config:
         "save_log": True,
         "headless_mode": False,
         "appearance_mode": "System",
-        "color_theme": "blue"
+		"color_theme": "blue",
+		# Auto search settings
+		"auto_search_enabled": False,
+		"auto_search_interval_hours": 24,
+		"last_auto_search": None,
+		"run_on_startup": False,
+		# Remember last used paths
+		"last_search_file": "",
+		"last_driver_path": ""
     }
     
     @classmethod
@@ -172,6 +180,13 @@ class BingSearchAutomation:
                     pass
             self.update_status(f"Completed {completed_searches}/{len(searches)} searches")
             self.is_running = False
+            # Record timestamp of last auto search
+            try:
+                updated_config = {**self.config, "last_auto_search": datetime.now().isoformat()}
+                Config.save(updated_config)
+                self.config = updated_config
+            except Exception as e:
+                logging.error(f"Failed to update last_auto_search: {str(e)}")
 
     def single_search(self, driver, search_term, current, total):
         driver.get("https://www.bing.com")
@@ -250,6 +265,8 @@ class SearchAutomationGUI:
                 self.update_progress
             )
             self.setup_gui()
+            # Attempt auto-run if enabled and due
+            self.maybe_auto_run()
             
         except Exception as e:
             messagebox.showerror("Initialization Error", f"Error starting application: {str(e)}")
@@ -258,8 +275,8 @@ class SearchAutomationGUI:
             sys.exit(1)
 
     def setup_variables(self):
-        self.search_file_var = tk.StringVar()
-        self.driver_file_var = tk.StringVar()
+        self.search_file_var = tk.StringVar(value=self.config.get('last_search_file', ''))
+        self.driver_file_var = tk.StringVar(value=self.config.get('last_driver_path', ''))
         self.headless_var = tk.BooleanVar(value=self.config.get('headless_mode', False))
         self.search_delay_min = tk.DoubleVar(value=self.config.get('search_delay', [3, 7])[0])
         self.search_delay_max = tk.DoubleVar(value=self.config.get('search_delay', [3, 7])[1])
@@ -267,6 +284,10 @@ class SearchAutomationGUI:
         self.max_retries = tk.IntVar(value=self.config.get('max_retries', 3))
         self.save_log_var = tk.BooleanVar(value=self.config.get('save_log', True))
         self.appearance_var = tk.StringVar(value=self.config.get('appearance_mode', 'System'))
+        # Auto search variables
+        self.auto_enabled_var = tk.BooleanVar(value=self.config.get('auto_search_enabled', False))
+        self.auto_interval_hours = tk.IntVar(value=self.config.get('auto_search_interval_hours', 24))
+        self.run_on_startup_var = tk.BooleanVar(value=self.config.get('run_on_startup', False))
 
     def setup_gui(self):
         # Create main container
@@ -471,6 +492,38 @@ class SearchAutomationGUI:
         )
         save_button.pack(pady=20)
 
+        # Auto search settings
+        auto_frame = ctk.CTkFrame(settings_frame)
+        auto_frame.pack(fill="x", pady=10)
+
+        auto_switch = ctk.CTkSwitch(
+            auto_frame, 
+            text="Enable Auto Search (every 24 hours)", 
+            variable=self.auto_enabled_var,
+            onvalue=True,
+            offvalue=False
+        )
+        auto_switch.pack(side="left")
+        ToolTip(auto_switch, "Automatically run searches once per day when the app starts")
+
+        interval_frame = ctk.CTkFrame(settings_frame)
+        interval_frame.pack(fill="x", pady=10)
+        ctk.CTkLabel(interval_frame, text="Auto Search Interval (hours):").pack(side="left")
+        interval_entry = ctk.CTkEntry(interval_frame, textvariable=self.auto_interval_hours, width=80)
+        interval_entry.pack(side="left", padx=10)
+
+        startup_frame = ctk.CTkFrame(settings_frame)
+        startup_frame.pack(fill="x", pady=10)
+        startup_switch = ctk.CTkSwitch(
+            startup_frame,
+            text="Run on system login (if supported)",
+            variable=self.run_on_startup_var,
+            onvalue=True,
+            offvalue=False
+        )
+        startup_switch.pack(side="left")
+        ToolTip(startup_switch, "Launch the app automatically when you sign in")
+
     def create_about_tab(self):
         about_frame = ctk.CTkFrame(self.tab_about)
         about_frame.pack(fill="both", expand=True, padx=20, pady=20)
@@ -484,7 +537,7 @@ class SearchAutomationGUI:
         
         ctk.CTkLabel(
             about_frame, 
-            text="Version 1.1.0", 
+            text="Version 1.2.0", 
             font=("Helvetica", 14)
         ).pack()
         
@@ -564,6 +617,18 @@ class SearchAutomationGUI:
         file_path = filedialog.askopenfilename(title=title, filetypes=file_types)
         if file_path:
             var.set(file_path)
+            # Persist last paths for auto-run
+            try:
+                updated = {**self.config}
+                if var is self.search_file_var:
+                    updated['last_search_file'] = file_path
+                if var is self.driver_file_var:
+                    updated['last_driver_path'] = file_path
+                Config.save(updated)
+                self.config = updated
+                self.automation.config = updated
+            except Exception as e:
+                logging.error(f"Failed to persist selected file path: {str(e)}")
 
     def update_status(self, message):
         self.status_label.configure(text=message)
@@ -613,11 +678,20 @@ class SearchAutomationGUI:
                 'save_log': self.save_log_var.get(),
                 'headless_mode': self.headless_var.get(),
                 'appearance_mode': self.appearance_var.get(),
-                'color_theme': 'blue'  # Could make this configurable in the future
+                'color_theme': 'blue',  # Could make this configurable in the future
+                # Auto search settings
+                'auto_search_enabled': self.auto_enabled_var.get(),
+                'auto_search_interval_hours': self.auto_interval_hours.get(),
+                'run_on_startup': self.run_on_startup_var.get(),
+                # Remember last paths
+                'last_search_file': self.search_file_var.get(),
+                'last_driver_path': self.driver_file_var.get()
             }
             Config.save(config)
             self.automation.config = config
             self.update_status("Settings saved successfully")
+            # Configure OS login startup
+            self.configure_run_on_startup(config.get('run_on_startup', False))
         except Exception as e:
             messagebox.showerror("Error", f"Failed to save settings: {str(e)}")
 
@@ -646,6 +720,97 @@ class SearchAutomationGUI:
                 self.root.destroy()
         else:
             self.root.destroy()
+
+    def maybe_auto_run(self):
+        try:
+            if not self.config.get('auto_search_enabled', False):
+                return
+            search_file = self.config.get('last_search_file') or ''
+            driver_path = self.config.get('last_driver_path') or ''
+            if not search_file or not driver_path or not os.path.isfile(search_file) or not os.path.isfile(driver_path):
+                return
+            last_run_iso = self.config.get('last_auto_search')
+            interval_hours = int(self.config.get('auto_search_interval_hours', 24))
+            due = True
+            if last_run_iso:
+                try:
+                    last_dt = datetime.fromisoformat(last_run_iso)
+                    due = (datetime.now() - last_dt).total_seconds() >= interval_hours * 3600
+                except Exception:
+                    due = True
+            if not due:
+                return
+            # Temporarily force headless for auto-run
+            previous_headless = bool(self.automation.config.get('headless_mode', False))
+            self.automation.config['headless_mode'] = True
+            # Start background search
+            self.automation.start_search_thread(search_file, driver_path)
+            # Reflect UI state
+            if hasattr(self, 'start_button') and hasattr(self, 'stop_button'):
+                self.start_button.configure(state="disabled")
+                self.stop_button.configure(state="normal")
+            # Restore headless after completion
+            self.root.after(2000, lambda: self._restore_headless_after_run(previous_headless))
+        except Exception as e:
+            logging.error(f"Auto-run failed: {str(e)}")
+
+    def _restore_headless_after_run(self, previous_headless):
+        try:
+            if getattr(self.automation, 'is_running', False):
+                self.root.after(2000, lambda: self._restore_headless_after_run(previous_headless))
+                return
+            self.automation.config['headless_mode'] = previous_headless
+            self.headless_var.set(previous_headless)
+            new_cfg = {**self.config, 'headless_mode': previous_headless}
+            Config.save(new_cfg)
+            self.config = new_cfg
+        except Exception as e:
+            logging.error(f"Failed to restore headless setting: {str(e)}")
+
+    def configure_run_on_startup(self, enable):
+        try:
+            if sys.platform.startswith('win'):
+                try:
+                    import winreg  # type: ignore
+                    run_key_path = r"Software\\Microsoft\\Windows\\CurrentVersion\\Run"
+                    app_name = "BingSearchAutomation"
+                    exe_path = sys.executable if getattr(sys, 'frozen', False) else sys.argv[0]
+                    with winreg.OpenKey(winreg.HKEY_CURRENT_USER, run_key_path, 0, winreg.KEY_ALL_ACCESS) as key:
+                        if enable:
+                            winreg.SetValueEx(key, app_name, 0, winreg.REG_SZ, f'"{exe_path}"')
+                        else:
+                            try:
+                                winreg.DeleteValue(key, app_name)
+                            except FileNotFoundError:
+                                pass
+                except Exception as e:
+                    logging.error(f"Failed to configure Windows startup: {str(e)}")
+            elif sys.platform.startswith('linux'):
+                try:
+                    autostart_dir = os.path.join(os.path.expanduser('~'), '.config', 'autostart')
+                    os.makedirs(autostart_dir, exist_ok=True)
+                    desktop_file = os.path.join(autostart_dir, 'bing-search-automation.desktop')
+                    exec_path = sys.executable if getattr(sys, 'frozen', False) else sys.executable + f" {os.path.abspath(__file__)}"
+                    if enable:
+                        content = (
+                            "[Desktop Entry]\n"
+                            "Type=Application\n"
+                            "Name=Bing Search Automation\n"
+                            f"Exec={exec_path}\n"
+                            "X-GNOME-Autostart-enabled=true\n"
+                        )
+                        with open(desktop_file, 'w') as f:
+                            f.write(content)
+                    else:
+                        if os.path.exists(desktop_file):
+                            os.remove(desktop_file)
+                except Exception as e:
+                    logging.error(f"Failed to configure Linux startup: {str(e)}")
+            else:
+                # Other OS not supported
+                pass
+        except Exception as e:
+            logging.error(f"configure_run_on_startup error: {str(e)}")
 
 if __name__ == "__main__":
     try:
